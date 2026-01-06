@@ -1,33 +1,39 @@
 package frc.trigon.robot.subsystems.arm;
 
 import com.ctre.phoenix6.controls.VoltageOut;
+import com.ctre.phoenix6.hardware.CANcoder;
 import com.ctre.phoenix6.hardware.TalonFX;
 import edu.wpi.first.math.controller.ArmFeedforward;
-import edu.wpi.first.math.geometry.Rotation2d;
+import edu.wpi.first.math.controller.PIDController;
 import edu.wpi.first.math.trajectory.TrapezoidProfile;
 import edu.wpi.first.wpilibj.Timer;
 import edu.wpi.first.wpilibj2.command.SubsystemBase;
+import edu.wpi.first.math.geometry.Rotation2d;
+import frc.trigon.lib.hardware.phoenix6.talonfx.TalonFXMotor;
 
 public class Arm extends SubsystemBase {
-    private final TalonFX motor = ArmConstants.MOTOR;
-    private final VoltageOut voltageRequest = new VoltageOut(0).withEnableFOC(ArmConstants.FOC_ENABLE);
-    private final ArmFeedforward ff = ArmConstants.FEED_FORWARD;
-    private final double prevSetpointVel = 0.0;
-    private final TrapezoidProfile.State goal = ArmConstants.TARGET_PROFILE_STATE;
-    private final TrapezoidProfile.State currentState = ArmConstants.CURRENT_STATE ;
-    private double lastAngleMotorProfileGenerationTime;
-    private TrapezoidProfile angleMotorProfile = null;
+    private final TalonFXMotor motor = ArmConstants.MOTOR;
+    private final VoltageOut voltageRequest = new VoltageOut(0).withEnableFOC(ArmConstants.FOC_ENABLED);
+    private final PIDController pidController = ArmConstants.PID;
+    private final CANcoder encoder = ArmConstants.ENCODER;
+
+    private final TrapezoidProfile profile = new TrapezoidProfile(ArmConstants.CONSTRAINTS);
+    private TrapezoidProfile.State goalState = new TrapezoidProfile.State();
+    private TrapezoidProfile.State initialState = new TrapezoidProfile.State();
+    private final ArmFeedforward feedforward = ArmConstants.FEEDFORWARD;
+
+    private final Timer profileTimer = new Timer();
 
     public Arm() {
-        double currentRad = getCurrentAngle().getRadians();
     }
 
-    void setTargetState(ArmConstants.ArmState targetState) {
-        setTargetAngle(targetState.targetAngle);
-    }
+    public boolean atState(ArmConstants.ArmState targetState) {
+        Rotation2d currentAngle = getCurrentAngle();
+        Rotation2d targetAngle = targetState.targetAngle;
 
-    void setTargetAngle(Rotation2d targetAngle) {
-        setTargetVoltage(calculatePIDOutput(targetAngle));
+        return Math.abs(
+                currentAngle.minus(targetAngle).getRotations()
+        ) <= ArmConstants.TOLERANCE.getRotations();
     }
 
     void stop() {
@@ -39,31 +45,42 @@ public class Arm extends SubsystemBase {
     }
 
     private double calculatePIDOutput(Rotation2d targetAngle) {
-        return ArmConstants.PID_CONTROLLER.calculate(getCurrentAngle().getRotations(), targetAngle.getRotations());
+        return ArmConstants.PID.calculate(getCurrentAngle().getRotations(), targetAngle.getRotations());
     }
 
-    private Rotation2d getCurrentAngle(){
-        double rotations = ArmConstants.ANGLE_STATUS_SIGNAL.refresh().getValueAsDouble();
+    private Rotation2d getCurrentAngle() {
+        double rotations = ArmConstants.ANGLE_SIGNAL.refresh().getValueAsDouble();
         return Rotation2d.fromRotations(rotations);
     }
 
-    private void generateAngleMotorProfile(){
-        angleMotorProfile = new TrapezoidProfile(ArmConstants.PROFILE_CONSTRAINTS);
-        lastAngleMotorProfileGenerationTime = Timer.getFPGATimestamp();
+    void initializeMotionProfile(Rotation2d targetPosition) {
+        initialState = new TrapezoidProfile.State(getCurrentAngle().getRotations(), encoder.getVelocity().getValueAsDouble());
+
+        goalState = new TrapezoidProfile.State(targetPosition.getRotations(), 0);
+
+        profileTimer.restart();
     }
 
-    private double getAngleMotorProfileTimer(){
-        return Timer.getFPGATimestamp() - lastAngleMotorProfileGenerationTime;
+    private TrapezoidProfile.State calculateSetpoint() {
+        return profile.calculate(profileTimer.get(), initialState, goalState);
     }
 
-    private void setTargetAngleFromProfile(){
-        generateAngleMotorProfile();
-        if (angleMotorProfile == null){
-            motor.stopMotor();
-            return;
-        }
+    void followSetpoint(Rotation2d setpoint) {
+        final double pidOutput = calculatePIDOutput(setpoint);
+        final double ffOutput = calculateFeedForward();
 
-        TrapezoidProfile.State targetState = angleMotorProfile.calculate(getAngleMotorProfileTimer(),currentState,goal);
-        calculatePIDOutput(Rotation2d.fromRadians(targetState.position));
+        setTargetVoltage(pidOutput + ffOutput);
+    }
+
+    private double calculateFeedForward() {
+        double position = getCurrentAngle().getRotations();
+        double velocity = 0;
+        return feedforward.calculate(position, velocity);
+    }
+
+    void followMotionProfile() {
+        final TrapezoidProfile.State setpoint = calculateSetpoint();
+        final Rotation2d setpointAsRotations = Rotation2d.fromRotations(setpoint.position);
+        followSetpoint(setpointAsRotations);
     }
 }
